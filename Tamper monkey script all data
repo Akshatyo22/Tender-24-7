@@ -1,0 +1,191 @@
+// ==UserScript==
+// @name         Tender Data Extractor (with Button)
+// @namespace    http://tampermonkey.net/
+// @version      1.7
+// @description  Extracts tender data. Waits for content to load, then press Ctrl+Shift+E or click the 'Run' button.
+// @author       You
+// @match        https://www.tender247.com/auth/tender/*
+// @grant        GM_xmlhttpRequest
+// @connect      script.google.com
+// @connect      script.googleusercontent.com
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // --- CONFIGURATION ---
+    const GOOGLE_SHEET_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbwQUwm7QQdQ1--qlEf-dcLOEHhLtMxry4WMCQvDPzseO8HnlsIYTiHCjlsMqJxtAsmf/exec';
+    const KEY_ELEMENT_SELECTOR = "span.text-\\[\\#121212\\].text-\\[20px\\]"; // The project title element we wait for.
+
+    // --- VISUAL INDICATOR FUNCTIONS ---
+    function showIndicator(message, bgColor = '#333') {
+        hideIndicator();
+        const indicator = document.createElement('div');
+        indicator.id = 'gm-indicator';
+        indicator.textContent = message;
+        indicator.style.cssText = `
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+            background-color: ${bgColor}; color: white; padding: 12px 20px;
+            border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+            z-index: 99999; font-size: 16px; font-family: sans-serif;
+            transition: top 0.3s ease;
+        `;
+        document.body.appendChild(indicator);
+    }
+
+    function hideIndicator() {
+        const indicator = document.getElementById('gm-indicator');
+        if (indicator) indicator.remove();
+    }
+
+    // --- HELPER FUNCTIONS ---
+    function findValueByLabel(labelText) {
+        const allElements = document.querySelectorAll('*');
+        for (const element of allElements) {
+            if (element.textContent.trim() === labelText) {
+                let valueElement = element.nextElementSibling;
+                if (valueElement && valueElement.tagName === 'BR') valueElement = valueElement.nextElementSibling;
+                return valueElement?.textContent.trim() || 'Not Found';
+            }
+        }
+        return 'Not Found';
+    }
+
+    function getListByHeading(headingText) {
+        const items = [];
+        const allHeadings = document.querySelectorAll('h4');
+        for (const heading of allHeadings) {
+            if (heading.textContent.includes(headingText)) {
+                const listElement = heading.nextElementSibling;
+                if (listElement) {
+                    listElement.querySelectorAll('li').forEach(item => items.push(item.textContent.trim()));
+                }
+                return items; // Return after finding the first matching heading
+            }
+        }
+        return items;
+    }
+
+    function getWebsiteLink() {
+        const allSpans = document.querySelectorAll('span.font-semibold');
+        for (const span of allSpans) {
+            if (span.textContent.trim().includes('Website -')) {
+                return span.nextElementSibling?.querySelector('a')?.href || 'Not Found';
+            }
+        }
+        return 'Not Found';
+    }
+
+    function getUniqueId() {
+        try {
+            const urlParts = window.location.pathname.split('/');
+            const uniqueId = urlParts[urlParts.length - 1];
+            if (uniqueId && uniqueId.startsWith('T')) return uniqueId;
+        } catch (e) { console.error("Could not extract ID from URL", e); }
+        return 'Not Found';
+    }
+
+    // --- MAIN EXTRACTION FUNCTION ---
+    function extractAndSendData() {
+        showIndicator('🔎 Scraping data from the page...');
+        setTimeout(() => { // Using a small timeout to let the UI update
+            try {
+                const tenderData = {
+                    uniqueId: getUniqueId(),
+                    projectTitle: document.querySelector(KEY_ELEMENT_SELECTOR)?.textContent.trim() || 'Not Found',
+                    submissionDate: findValueByLabel('Submission Date'),
+                    openingDate: findValueByLabel('Opening Date'),
+                    estimatedCost: findValueByLabel('Tender Estimated Cost'),
+                    emd: findValueByLabel('EMD'),
+                    docFees: findValueByLabel('Tender Document Fees'),
+                    brief: findValueByLabel('Brief :'),
+                    description: findValueByLabel('Description :'),
+                    t247Id: findValueByLabel('T247 ID -'),
+                    orgTenderId: findValueByLabel('Organization Tender ID -'),
+                    quantity: findValueByLabel('Quantity -'),
+                    msmeExemption: findValueByLabel('msme exemption -'),
+                    startupExemption: findValueByLabel('startup exemption -'),
+                    siteLocation: findValueByLabel('site location -'),
+                    contactPerson: findValueByLabel('Contact Person -'),
+                    contactAddress: findValueByLabel('Contact Address -'),
+                    contactNumber: findValueByLabel('Contact Number -'),
+                    contactEmail: findValueByLabel('Contact Email -'),
+                    website: getWebsiteLink(),
+                    maxWinCompanies: getListByHeading('Maximum Win:'),
+                    probableParticipants: getListByHeading('Probable Participants:')
+                };
+
+                console.log("📦 Data scraped:", tenderData);
+                showIndicator('📤 Sending data to Google Sheets...');
+
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: GOOGLE_SHEET_WEB_APP_URL,
+                    data: JSON.stringify(tenderData),
+                    headers: { 'Content-Type': 'application/json' },
+                    onload: function(response) {
+                        try {
+                            const result = JSON.parse(response.responseText);
+                            if (result.result === 'success') {
+                                showIndicator('✅ Success! Data added to sheet.', '#28a745');
+                            } else if (result.result === 'duplicate') {
+                                showIndicator('🟡 Duplicate: This tender already exists.', '#ffc107');
+                            } else {
+                                showIndicator(`❌ Error: ${result.message}`, '#dc3545');
+                            }
+                        } catch (e) {
+                             showIndicator(`❌ Parse Error: Invalid response from server.`, '#dc3545');
+                             console.error("Response parse error:", response.responseText);
+                        }
+                        setTimeout(hideIndicator, 4000);
+                    },
+                    onerror: function(response) {
+                        showIndicator('❌ Network Error: Could not connect.', '#dc3545');
+                        console.error("GM_xmlhttpRequest error:", response);
+                        setTimeout(hideIndicator, 4000);
+                    }
+                });
+            } catch (error) {
+                console.error("Scraping failed:", error);
+                showIndicator(`❌ Scraping Error: ${error.message}`, '#dc3545');
+                setTimeout(hideIndicator, 5000);
+            }
+        }, 100);
+    }
+
+    // --- INITIALIZATION AND TRIGGERS ---
+    function setupTriggers() {
+        // 1. Add the button to the page
+        const button = document.createElement('button');
+        button.id = 'gm-run-button';
+        button.innerHTML = '🚀 Extract Tender Data';
+        button.style.cssText = `
+            position: fixed; top: 20px; right: 20px; background-color: #007bff;
+            color: white; padding: 10px 15px; border: none; border-radius: 5px;
+            cursor: pointer; z-index: 9998; font-size: 14px; box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        `;
+        button.onclick = extractAndSendData;
+        document.body.appendChild(button);
+
+        // 2. Add the keyboard shortcut listener
+        document.addEventListener('keydown', function(event) {
+            if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'e') {
+                event.preventDefault();
+                extractAndSendData();
+            }
+        });
+
+        console.log("✅ Tender extractor is ready. Press Ctrl+Shift+E or click the 'Extract' button.");
+    }
+
+    // --- WAIT FOR PAGE TO BE READY ---
+    // Poll the page until a key element is found, then set up the script.
+    const initInterval = setInterval(() => {
+        const keyElement = document.querySelector(KEY_ELEMENT_SELECTOR);
+        if (keyElement) {
+            clearInterval(initInterval); // Stop checking
+            setupTriggers(); // Run the setup
+        }
+    }, 500); // Check every half-second
+
+})();
